@@ -202,3 +202,32 @@ fn angle_window_and_range_filter() {
     let (_, half) = complete_scans(&FRONT, DecoderConfig { start_angle: 0.0, end_angle: 180.0, ..vendor_config() });
     assert!(half[0].points.len() < all[0].points.len());
 }
+
+#[test]
+fn both_lidars_slice_at_the_same_azimuths() {
+    // ten sectors a turn: each lidar's slices cover 36 degrees and start where the other's do, so two lidars spinning
+    // in phase hand over slices measured over the same instants
+    let config = DecoderConfig { split: robosense_airy::SplitMode::Sectors(10), ..vendor_config() };
+    let mut starts = Vec::new();
+    for lidar in [FRONT, REAR] {
+        let (_, scans) = complete_scans(&lidar, config.clone());
+        assert!(scans.len() >= 5, "{} slices", scans.len());
+        let spans: Vec<f64> = scans
+            .iter()
+            .map(|s| (s.points.iter().map(|p| p.time).fold(f64::MIN, f64::max) - s.timestamp) * 1e3)
+            .collect();
+        assert!(spans.iter().all(|ms| *ms <= 10.5), "{spans:?}");
+        // the front capture lost 5 ms of packets at one turn's start, which leaves one short slice
+        assert!(spans.iter().filter(|ms| **ms < 9.5).count() <= 1, "{spans:?}");
+        starts.push(scans.iter().map(|s| s.timestamp).collect::<Vec<_>>());
+    }
+    // the two Airys spin in phase on one PTP clock (a turn starts on the 100 ms), so 36 degree slices start on the
+    // same 10 ms grid: the captures were taken apart, so compare where each slice falls on that grid
+    let phase_ms = |t: &f64| (t * 1e3).rem_euclid(10.0);
+    for (lidar, ts) in starts.iter().enumerate() {
+        for t in ts {
+            let off = phase_ms(t).min(10.0 - phase_ms(t));
+            assert!(off < 0.2, "lidar {lidar}: a slice starts {off:.3} ms off the 10 ms grid");
+        }
+    }
+}

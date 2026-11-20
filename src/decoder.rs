@@ -65,6 +65,9 @@ pub enum SplitMode {
     FixedBlocks,
     /// A new scan every this many blocks.
     CustomBlocks(u16),
+    /// A new scan each time a block's azimuth crosses a multiple of 360 / n degrees: n slices per revolution, cut at
+    /// the same azimuths every turn, so lidars spinning in phase (PTP-locked) slice at the same instants.
+    Sectors(u16),
 }
 
 /// Optional rigid transform applied to every point (rs_driver's ENABLE_TRANSFORM + RSTransformParam).
@@ -248,6 +251,7 @@ impl AzimuthSection {
 enum Splitter {
     Angle { split_angle: i32, prev_angle: i32 },
     Blocks { blocks: u16 },
+    Sectors { width: i32, prev_angle: Option<i32> },
 }
 
 impl Splitter {
@@ -257,6 +261,7 @@ impl Splitter {
                 let a = (deg * 100.0) as u16 as i32;
                 Splitter::Angle { split_angle: a, prev_angle: a }
             }
+            SplitMode::Sectors(n) => Splitter::Sectors { width: ONE_ROUND / i32::from(n.max(1)), prev_angle: None },
             _ => Splitter::Blocks { blocks: 0 },
         }
     }
@@ -270,6 +275,21 @@ impl Splitter {
                 let v = *prev_angle < *split_angle && *split_angle <= angle;
                 *prev_angle = angle;
                 v
+            }
+            Splitter::Sectors { width, prev_angle } => {
+                // block azimuths can read a hair past 360 degrees before they wrap
+                let angle = angle.rem_euclid(ONE_ROUND);
+                let Some(prev) = *prev_angle else {
+                    *prev_angle = Some(angle);
+                    return false;
+                };
+                // a turn wraps the azimuth by a whole round; a small step back (block jitter) is not a new sector
+                let wrapped = angle < prev - ONE_ROUND / 2;
+                if angle < prev && !wrapped {
+                    return false;
+                }
+                *prev_angle = Some(angle);
+                wrapped || prev / *width != angle / *width
             }
             Splitter::Blocks { blocks } => {
                 *blocks += 1;
