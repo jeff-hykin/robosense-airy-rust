@@ -1,6 +1,7 @@
 //! Prints scan statistics from a live Airy or a pcap capture.
 //!
 //! airy-stats live --lidar front:224.10.10.201:6691:7781:6681 [--lidar ...] --interface 10.21.33.103 [--seconds 30]
+//!     [--scan-queue N] [--imu-queue N]
 //! airy-stats pcap capture.pcap [more.pcap ...] [--msop-port 6691 --difop-port 7781 --imu-port 6681]
 //! common: --voxel M  --decimate-points N  --decimate-scans N  --host-clock  --min-distance M --max-distance M
 
@@ -13,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  airy-stats live --lidar NAME:GROUP:MSOP:DIFOP[:IMU] [--lidar ...] [--interface ADDR] [--seconds S]\n  \
+        "usage:\n  airy-stats live --lidar NAME:GROUP:MSOP:DIFOP[:IMU] [--lidar ...] [--interface ADDR] [--seconds S] [--scan-queue N] [--imu-queue N]\n  \
          airy-stats pcap FILE... [--msop-port P] [--difop-port P] [--imu-port P]\n\
          options: --voxel M --decimate-points N --decimate-scans N --host-clock --min-distance M --max-distance M"
     );
@@ -72,7 +73,13 @@ impl Window {
         self.gyro_norm_max = self.gyro_norm_max.max((g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt());
     }
 
-    fn line(&self, name: &str, seconds: f64, with_lag: bool) -> String {
+    fn merge_imu(&mut self, other: &Window) {
+        self.imu += other.imu;
+        self.accel_norm_sum += other.accel_norm_sum;
+        self.gyro_norm_max = self.gyro_norm_max.max(other.gyro_norm_max);
+    }
+
+    fn line(&self, name: &str, seconds: f64, imu_seconds: f64, with_lag: bool) -> String {
         let mean = |v: f64, n: u64| if n > 0 { v / n as f64 } else { 0.0 };
         let mut s = format!(
             "{name}: {:.2} scans/s, points/scan mean {:.0} min {} max {}, rings {}, x [{:.2}, {:.2}] y [{:.2}, {:.2}] \
@@ -90,7 +97,7 @@ impl Window {
             self.hi[2],
             self.max_range,
             mean(self.scan_span_sum, self.scans) * 1e3,
-            self.imu as f64 / seconds,
+            self.imu as f64 / imu_seconds,
             mean(self.accel_norm_sum, self.imu),
             self.gyro_norm_max,
         );
@@ -111,6 +118,7 @@ struct Args {
     lidars: Vec<String>,
     interface: Ipv4Addr,
     seconds: Option<f64>,
+    queues: (usize, usize),
     ports: [u16; 3],
     decoder: DecoderConfig,
     filter: FilterConfig,
@@ -125,6 +133,7 @@ fn parse() -> Args {
         lidars: vec![],
         interface: Ipv4Addr::UNSPECIFIED,
         seconds: None,
+        queues: (1, 1),
         ports: [6699, 7788, 6688],
         decoder: DecoderConfig { use_lidar_clock: true, dense_points: true, ts_first_point: true, ..Default::default() },
         filter: FilterConfig::default(),
@@ -137,6 +146,8 @@ fn parse() -> Args {
             "--lidar" => a.lidars.push(val(&mut it)),
             "--interface" => a.interface = val(&mut it),
             "--seconds" => a.seconds = Some(val(&mut it)),
+            "--scan-queue" => a.queues.0 = val(&mut it),
+            "--imu-queue" => a.queues.1 = val(&mut it),
             "--msop-port" => a.ports[0] = val(&mut it),
             "--difop-port" => a.ports[1] = val(&mut it),
             "--imu-port" => a.ports[2] = val(&mut it),
@@ -158,6 +169,8 @@ fn run_pcap(a: &Args) {
     let mut decoder = Decoder::new(a.decoder.clone());
     let mut window = Window::default();
     let (mut first, mut last) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut imu_first, mut imu_last) = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut imu_window = Window::default();
     let mut datagrams = Vec::new();
     for path in &a.rest {
         datagrams.extend(pcap::read_udp(path).unwrap_or_else(|e| {
@@ -191,7 +204,9 @@ fn run_pcap(a: &Args) {
             }
             Some(PacketKind::Imu) if d.dst_port == a.ports[2] => {
                 if let Ok(s) = decoder.decode_imu(&d.payload) {
-                    window.add_imu(&s);
+                    imu_first = imu_first.min(d.time);
+                    imu_last = imu_last.max(d.time);
+                    imu_window.add_imu(&s);
                 }
             }
             _ => {}
@@ -203,7 +218,11 @@ fn run_pcap(a: &Args) {
             difop.rpm, difop.install_mode, difop.return_mode, difop.fov_start, difop.fov_end, difop.serial
         );
     }
-    println!("{}", window.line("pcap", (last - first).max(1e-9), false));
+    // the IMU's rate over its own capture span, which can differ from the points'
+    let imu_span = (imu_last - imu_first).max(1e-9);
+    let scan_span = (last - first).max(1e-9);
+    window.merge_imu(&imu_window);
+    println!("{}", window.line("pcap", scan_span, imu_span, false));
 }
 
 fn run_live(a: &Args) {
@@ -226,18 +245,20 @@ fn run_live(a: &Args) {
             frame_id: parts[0].to_string(),
             decoder: a.decoder.clone(),
             filter: a.filter.clone(),
+            scan_queue: a.queues.0,
+            imu_queue: a.queues.1,
             ..Default::default()
         };
         let mut sensor = Sensor::open(config).unwrap_or_else(|e| {
             eprintln!("{spec}: {e}");
             exit(1)
         });
-        let window = Arc::new(Mutex::new(Window::default()));
-        let total = Arc::new(Mutex::new(Window::default()));
+        // scans and IMU samples tally under separate locks, so a scan being tallied never holds up the IMU consumer
+        let windows: [Arc<Mutex<Window>>; 4] = Default::default();
         let stats = sensor.stats_handle();
         let imu = sensor.take_imu();
         {
-            let (window, total) = (window.clone(), total.clone());
+            let (window, total) = (windows[2].clone(), windows[3].clone());
             std::thread::spawn(move || {
                 for s in imu.iter() {
                     window.lock().unwrap().add_imu(&s);
@@ -246,7 +267,7 @@ fn run_live(a: &Args) {
             });
         }
         {
-            let (window, total) = (window.clone(), total.clone());
+            let (window, total) = (windows[0].clone(), windows[1].clone());
             std::thread::spawn(move || {
                 for f in sensor.scans().iter() {
                     window.lock().unwrap().add_scan(&f.scan);
@@ -254,7 +275,7 @@ fn run_live(a: &Args) {
                 }
             });
         }
-        sensors.push((parts[0].to_string(), stats, window, total));
+        sensors.push((parts[0].to_string(), stats, windows));
     }
     let start = Instant::now();
     let mut tick = Instant::now();
@@ -262,9 +283,10 @@ fn run_live(a: &Args) {
         std::thread::sleep(Duration::from_secs(1));
         let dt = tick.elapsed().as_secs_f64();
         tick = Instant::now();
-        for (name, _, window, _) in &sensors {
-            let w = std::mem::take(&mut *window.lock().unwrap());
-            println!("{}", w.line(name, dt, true));
+        for (name, _, windows) in &sensors {
+            let mut w = std::mem::take(&mut *windows[0].lock().unwrap());
+            w.merge_imu(&std::mem::take(&mut *windows[2].lock().unwrap()));
+            println!("{}", w.line(name, dt, dt, true));
         }
         if a.seconds.is_some_and(|s| start.elapsed().as_secs_f64() >= s) {
             break;
@@ -272,13 +294,17 @@ fn run_live(a: &Args) {
     }
     let secs = start.elapsed().as_secs_f64();
     println!("--- {secs:.1} s total");
-    for (name, s, _, total) in &sensors {
+    for (name, s, windows) in &sensors {
+        let mut total = windows[1].lock().unwrap().clone();
+        total.merge_imu(&windows[3].lock().unwrap());
         let get = |c: &std::sync::atomic::AtomicU64| c.load(std::sync::atomic::Ordering::Relaxed);
-        println!("{}", total.lock().unwrap().line(name, secs, true));
+        println!("{}", total.line(name, secs, secs, true));
         println!(
-            "{name}: msop {} ({:.0}/s) difop {} imu {} decode_errors {} scans {} dropped {} skipped {} imu_dropped {}",
+            "{name}: msop {} ({:.0}/s, {} before the first difop) difop {} imu {} decode_errors {} scans {} dropped {} \
+             skipped {} imu_dropped {}",
             get(&s.msop_packets),
             get(&s.msop_packets) as f64 / secs,
+            get(&s.msop_waiting),
             get(&s.difop_packets),
             get(&s.imu_packets),
             get(&s.decode_errors),

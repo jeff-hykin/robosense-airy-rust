@@ -1,7 +1,7 @@
 //! Live sensor: joins the Airy's multicast group (or listens unicast), decodes on a receive thread, and hands complete
 //! scans and IMU samples to the consumer through bounded queues that drop the newest item when full.
 
-use crate::decoder::{Decoder, DecoderConfig, ImuSample, Scan};
+use crate::decoder::{DecodeError, Decoder, DecoderConfig, ImuSample, Scan};
 use crate::filter::{self, FilterConfig};
 use crate::packet::Difop;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -75,6 +75,8 @@ pub struct Stats {
     pub imu_dropped: AtomicU64,
     /// IMU samples dropped while waiting for the DIFOP extrinsic (`imu_in_lidar_frame`).
     pub imu_waiting: AtomicU64,
+    /// MSOP packets dropped before the first DIFOP gave the beam angles (`wait_for_difop`).
+    pub msop_waiting: AtomicU64,
 }
 
 /// A scan plus the frame it is in.
@@ -223,6 +225,10 @@ impl Sensor {
                     let scan = match decoder.decode_msop(bytes(&buf, n)) {
                         Ok(Some(scan)) => scan,
                         Ok(None) => continue,
+                        Err(DecodeError::NoDifop) => {
+                            stats.msop_waiting.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
                         Err(_) => {
                             stats.decode_errors.fetch_add(1, Ordering::Relaxed);
                             continue;

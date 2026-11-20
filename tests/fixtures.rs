@@ -1,10 +1,9 @@
 //! Decoding real packets captured from the Deep Robotics M20's two Airys (tcpdump on its AOS board, eth0).
 
 use robosense_airy::filter::{decimate, voxel_downsample};
-use robosense_airy::pcap::{read_udp, UdpDatagram};
+use robosense_airy::pcap::{parse_udp, UdpDatagram};
 use robosense_airy::{Decoder, DecoderConfig, LidarModel, Scan};
 
-const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
 struct Lidar {
     msop_file: &'static str,
@@ -17,8 +16,15 @@ struct Lidar {
 const FRONT: Lidar = Lidar { msop_file: "airy_msop_front.pcap", msop_port: 6691, difop_port: 7781, imu_port: 6681, ip: [10, 21, 33, 201] };
 const REAR: Lidar = Lidar { msop_file: "airy_msop_rear.pcap", msop_port: 6692, difop_port: 7782, imu_port: 6682, ip: [10, 21, 33, 202] };
 
+// embedded, so the test binary runs without the source tree (nix runs tests in a separate derivation)
 fn datagrams(file: &str) -> Vec<UdpDatagram> {
-    read_udp(format!("{FIXTURES}/{file}")).unwrap()
+    let bytes: &[u8] = match file {
+        "airy_difop_imu.pcap" => include_bytes!("fixtures/airy_difop_imu.pcap"),
+        "airy_msop_front.pcap" => include_bytes!("fixtures/airy_msop_front.pcap"),
+        "airy_msop_rear.pcap" => include_bytes!("fixtures/airy_msop_rear.pcap"),
+        other => panic!("no fixture {other}"),
+    };
+    parse_udp(bytes).unwrap()
 }
 
 fn decoder_with_difop(lidar: &Lidar, config: DecoderConfig) -> Decoder {

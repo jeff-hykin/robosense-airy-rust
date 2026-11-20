@@ -1,6 +1,6 @@
 [package]
 name = "robosense-airy"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "RoboSense Airy (RSAIRY) lidar driver: MSOP/DIFOP/IMU decoding ported from RoboSense's rs_driver, multicast receiver, voxel/decimation filters"
 license = "Apache-2.0"
