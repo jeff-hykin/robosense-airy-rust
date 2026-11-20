@@ -1,6 +1,6 @@
 [package]
 name = "robosense-airy"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "RoboSense Airy (RSAIRY) lidar driver: MSOP/DIFOP/IMU decoding ported from RoboSense's rs_driver, multicast receiver, voxel/decimation filters"
 license = "Apache-2.0"
@@ -18,6 +18,9 @@ path = "src/bin/airy-stats.rs"
 
 [dependencies]
 socket2 = { version = "0.6", features = ["all"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 debug = 1

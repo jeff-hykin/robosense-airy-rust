@@ -84,6 +84,10 @@ fn be_f32(b: &[u8], at: usize) -> f32 {
     f32::from_bits(be32(b, at))
 }
 
+fn bytes_at<const N: usize>(b: &[u8], at: usize) -> [u8; N] {
+    std::array::from_fn(|i| b[at + i])
+}
+
 /// rs_driver's `parseTimeUTCWithUs`: 6 bytes of seconds then 4 bytes of microseconds, both big endian.
 pub fn parse_time_utc_us(b: &[u8]) -> u64 {
     let sec = b[..6].iter().fold(0u64, |acc, &v| (acc << 8) + v as u64);
@@ -227,7 +231,6 @@ impl Difop {
         if b[..8] != DIFOP_ID {
             return Err(PacketError::WrongId);
         }
-        let arr = |at: usize, n: usize| b[at..at + n].to_vec();
         let cali = |at: usize| {
             (0..LASER_NUM)
                 .map(|i| CalibrationAngle { sign: b[at + i * 3], value: be16(b, at + i * 3 + 1) })
@@ -235,17 +238,17 @@ impl Difop {
         };
         Ok(Difop {
             rpm: be16(b, DIFOP_RPM),
-            lidar_ip: arr(DIFOP_ETH, 4).try_into().unwrap(),
-            dest_ip: arr(DIFOP_ETH + 4, 4).try_into().unwrap(),
-            mac: arr(DIFOP_ETH + 8, 6).try_into().unwrap(),
+            lidar_ip: bytes_at(b, DIFOP_ETH),
+            dest_ip: bytes_at(b, DIFOP_ETH + 4),
+            mac: bytes_at(b, DIFOP_ETH + 8),
             msop_port: be16(b, DIFOP_ETH + 14),
             difop_port: be16(b, DIFOP_ETH + 18),
             fov_start: be16(b, DIFOP_FOV),
             fov_end: be16(b, DIFOP_FOV + 2),
-            top_version: arr(DIFOP_VERSION, 5).try_into().unwrap(),
-            bottom_version: arr(DIFOP_VERSION + 5, 5).try_into().unwrap(),
+            top_version: bytes_at(b, DIFOP_VERSION),
+            bottom_version: bytes_at(b, DIFOP_VERSION + 5),
             install_mode: b[DIFOP_INSTALL_MODE],
-            serial: arr(DIFOP_SN, 6).try_into().unwrap(),
+            serial: bytes_at(b, DIFOP_SN),
             zero_cal: be16(b, DIFOP_ZERO_CAL),
             return_mode: b[DIFOP_RETURN_MODE],
             vert_angle_cali: cali(DIFOP_VERT_CALI),
@@ -262,7 +265,7 @@ impl Difop {
                 be_f32(b, DIFOP_QUAT + 12),
             ],
             imu_xyz: [be_f32(b, DIFOP_XYZ), be_f32(b, DIFOP_XYZ + 4), be_f32(b, DIFOP_XYZ + 8)],
-            ptp_err: arr(DIFOP_PTP_ERR, 4).try_into().unwrap(),
+            ptp_err: bytes_at(b, DIFOP_PTP_ERR),
             pitch_deg: be_f32(b, DIFOP_PITCH),
             yaw_deg: be_f32(b, DIFOP_YAW),
             roll_deg: be_f32(b, DIFOP_ROLL),
@@ -346,7 +349,7 @@ impl ImuPacket {
             odr: b[IMU_ODR],
             accel_fsr,
             gyro_fsr,
-            cnt: u32::from_le_bytes(b[IMU_CNT..IMU_CNT + 4].try_into().unwrap()),
+            cnt: u32::from_le_bytes(bytes_at(b, IMU_CNT)),
         })
     }
 }

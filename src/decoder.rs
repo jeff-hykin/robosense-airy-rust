@@ -254,7 +254,8 @@ impl Splitter {
     fn new(mode: SplitMode) -> Self {
         match mode {
             SplitMode::Angle(deg) => {
-                let a = (deg * 100.0) as u16 as i32;
+                // taken mod 360: an angle the azimuth never reaches (360, -10) would never split, growing one scan forever
+                let a = ((deg.rem_euclid(360.0) * 100.0) as i32).rem_euclid(ONE_ROUND);
                 Splitter::Angle { split_angle: a, prev_angle: a }
             }
             _ => Splitter::Blocks { blocks: 0 },

@@ -59,7 +59,7 @@ pub fn parse_udp(bytes: &[u8]) -> Result<Vec<UdpDatagram>, PcapError> {
     if bytes.len() < 24 {
         return Err(PcapError::NotPcap);
     }
-    let magic = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+    let magic = u32::from_le_bytes(bytes_at(bytes, 0));
     let (le, nanos) = match magic {
         0xa1b2c3d4 => (true, false),
         0xa1b23c4d => (true, true),
@@ -68,7 +68,7 @@ pub fn parse_udp(bytes: &[u8]) -> Result<Vec<UdpDatagram>, PcapError> {
         _ => return Err(PcapError::NotPcap),
     };
     let u32_at = |at: usize| {
-        let b: [u8; 4] = bytes[at..at + 4].try_into().unwrap();
+        let b: [u8; 4] = bytes_at(bytes, at);
         if le {
             u32::from_le_bytes(b)
         } else {
@@ -86,9 +86,10 @@ pub fn parse_udp(bytes: &[u8]) -> Result<Vec<UdpDatagram>, PcapError> {
         let frac = u32_at(at + 4) as f64;
         let incl = u32_at(at + 8) as usize;
         let frame_start = at + 16;
-        at = frame_start + incl;
-        if at > bytes.len() {
-            break;
+        // a truncated last record (or a length past the file) ends the capture
+        match frame_start.checked_add(incl).filter(|&end| end <= bytes.len()) {
+            Some(end) => at = end,
+            None => break,
         }
         let time = sec + frac * if nanos { 1e-9 } else { 1e-6 };
         if let Some(d) = udp_of_frame(&bytes[frame_start..at], linktype, time) {
@@ -96,6 +97,10 @@ pub fn parse_udp(bytes: &[u8]) -> Result<Vec<UdpDatagram>, PcapError> {
         }
     }
     Ok(out)
+}
+
+fn bytes_at<const N: usize>(b: &[u8], at: usize) -> [u8; N] {
+    std::array::from_fn(|i| b[at + i])
 }
 
 fn be16(b: &[u8], at: usize) -> u16 {
@@ -121,17 +126,63 @@ fn udp_of_frame(frame: &[u8], linktype: u32, time: f64) -> Option<UdpDatagram> {
     let ihl = (ip[0] & 0x0F) as usize * 4;
     let total = be16(ip, 2) as usize;
     let fragmented = be16(ip, 6) & 0x3FFF != 0;
-    if ip[0] >> 4 != 4 || ip[9] != IPPROTO_UDP || fragmented || ip.len() < total || total < ihl + 8 {
+    if ip[0] >> 4 != 4 || ihl < 20 || ip[9] != IPPROTO_UDP || fragmented || ip.len() < total || total < ihl + 8 {
         return None;
     }
     let udp = &ip[ihl..total];
     let udp_len = (be16(udp, 4) as usize).min(udp.len());
+    // a UDP length below its own 8-byte header is malformed
+    if udp_len < 8 {
+        return None;
+    }
     Some(UdpDatagram {
         time,
-        src: ip[12..16].try_into().unwrap(),
-        dst: ip[16..20].try_into().unwrap(),
+        src: bytes_at(ip, 12),
+        dst: bytes_at(ip, 16),
         src_port: be16(udp, 0),
         dst_port: be16(udp, 2),
         payload: udp[8..udp_len].to_vec(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn capture(frame: &[u8], incl: u32) -> Vec<u8> {
+        let mut b = vec![0u8; 24];
+        b[0..4].copy_from_slice(&0xa1b2c3d4u32.to_le_bytes());
+        b[20..24].copy_from_slice(&LINKTYPE_RAW.to_le_bytes());
+        b.extend_from_slice(&[0; 8]);
+        b.extend_from_slice(&incl.to_le_bytes());
+        b.extend_from_slice(&incl.to_le_bytes());
+        b.extend_from_slice(frame);
+        b
+    }
+
+    fn ipv4_udp(udp_len_field: u16, payload: &[u8]) -> Vec<u8> {
+        let total = (20 + 8 + payload.len()) as u16;
+        let mut ip = vec![0x45, 0, 0, 0, 0, 0, 0, 0, 64, IPPROTO_UDP, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2];
+        ip[2..4].copy_from_slice(&total.to_be_bytes());
+        ip.extend_from_slice(&[0x1a, 0x23, 0x1a, 0x23]);
+        ip.extend_from_slice(&udp_len_field.to_be_bytes());
+        ip.extend_from_slice(&[0, 0]);
+        ip.extend_from_slice(payload);
+        ip
+    }
+
+    #[test]
+    fn a_udp_length_below_its_header_is_skipped_not_a_panic() {
+        let good = ipv4_udp(11, b"abc");
+        assert_eq!(parse_udp(&capture(&good, good.len() as u32)).unwrap()[0].payload, b"abc");
+        // a length field of 3 sliced udp[8..3] and panicked
+        let bad = ipv4_udp(3, b"abc");
+        assert!(parse_udp(&capture(&bad, bad.len() as u32)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_record_longer_than_the_file_ends_the_capture() {
+        let good = ipv4_udp(11, b"abc");
+        assert!(parse_udp(&capture(&good, u32::MAX)).unwrap().is_empty());
+    }
 }

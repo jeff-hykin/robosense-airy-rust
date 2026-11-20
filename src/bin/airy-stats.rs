@@ -4,17 +4,20 @@
 //!     [--scan-queue N] [--imu-queue N]
 //! airy-stats pcap capture.pcap [more.pcap ...] [--msop-port 6691 --difop-port 7781 --imu-port 6681]
 //! common: --voxel M  --decimate-points N  --decimate-scans N  --host-clock  --min-distance M --max-distance M
+//! live also: --interval S (seconds between report lines, default 1)
+
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use robosense_airy::packet::PacketKind;
 use robosense_airy::{classify, pcap, Decoder, DecoderConfig, FilterConfig, ImuSample, Scan, Sensor, SensorConfig};
 use std::net::Ipv4Addr;
 use std::process::exit;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  airy-stats live --lidar NAME:GROUP:MSOP:DIFOP[:IMU] [--lidar ...] [--interface ADDR] [--seconds S] [--scan-queue N] [--imu-queue N]\n  \
+        "usage:\n  airy-stats live --lidar NAME:GROUP:MSOP:DIFOP[:IMU] [--lidar ...] [--interface ADDR] [--seconds S] [--scan-queue N] [--imu-queue N] [--interval S]\n  \
          airy-stats pcap FILE... [--msop-port P] [--difop-port P] [--imu-port P]\n\
          options: --voxel M --decimate-points N --decimate-scans N --host-clock --min-distance M --max-distance M"
     );
@@ -109,7 +112,11 @@ impl Window {
 }
 
 fn now() -> f64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64()
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64()
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 struct Args {
@@ -118,6 +125,7 @@ struct Args {
     lidars: Vec<String>,
     interface: Ipv4Addr,
     seconds: Option<f64>,
+    interval: f64,
     queues: (usize, usize),
     ports: [u16; 3],
     decoder: DecoderConfig,
@@ -133,6 +141,7 @@ fn parse() -> Args {
         lidars: vec![],
         interface: Ipv4Addr::UNSPECIFIED,
         seconds: None,
+        interval: 1.0,
         queues: (1, 8),
         ports: [6699, 7788, 6688],
         decoder: DecoderConfig { use_lidar_clock: true, dense_points: true, ts_first_point: true, ..Default::default() },
@@ -146,6 +155,7 @@ fn parse() -> Args {
             "--lidar" => a.lidars.push(val(&mut it)),
             "--interface" => a.interface = val(&mut it),
             "--seconds" => a.seconds = Some(val(&mut it)),
+            "--interval" => a.interval = val(&mut it),
             "--scan-queue" => a.queues.0 = val(&mut it),
             "--imu-queue" => a.queues.1 = val(&mut it),
             "--msop-port" => a.ports[0] = val(&mut it),
@@ -261,8 +271,8 @@ fn run_live(a: &Args) {
             let (window, total) = (windows[2].clone(), windows[3].clone());
             std::thread::spawn(move || {
                 for s in imu.iter() {
-                    window.lock().unwrap().add_imu(&s);
-                    total.lock().unwrap().add_imu(&s);
+                    lock(&window).add_imu(&s);
+                    lock(&total).add_imu(&s);
                 }
             });
         }
@@ -270,22 +280,29 @@ fn run_live(a: &Args) {
             let (window, total) = (windows[0].clone(), windows[1].clone());
             std::thread::spawn(move || {
                 for f in sensor.scans().iter() {
-                    window.lock().unwrap().add_scan(&f.scan);
-                    total.lock().unwrap().add_scan(&f.scan);
+                    lock(&window).add_scan(&f.scan);
+                    lock(&total).add_scan(&f.scan);
                 }
             });
         }
         sensors.push((parts[0].to_string(), stats, windows));
     }
+    if !(a.interval.is_finite() && a.interval > 0.0) {
+        usage();
+    }
+    let period = Duration::from_secs_f64(a.interval);
     let start = Instant::now();
     let mut tick = Instant::now();
+    let mut deadline = start;
     loop {
-        std::thread::sleep(Duration::from_secs(1));
+        // report cadence only (nothing waits on it); deadline-based so the lines do not drift
+        deadline += period;
+        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
         let dt = tick.elapsed().as_secs_f64();
         tick = Instant::now();
         for (name, _, windows) in &sensors {
-            let mut w = std::mem::take(&mut *windows[0].lock().unwrap());
-            w.merge_imu(&std::mem::take(&mut *windows[2].lock().unwrap()));
+            let mut w = std::mem::take(&mut *lock(&windows[0]));
+            w.merge_imu(&std::mem::take(&mut *lock(&windows[2])));
             println!("{}", w.line(name, dt, dt, true));
         }
         if a.seconds.is_some_and(|s| start.elapsed().as_secs_f64() >= s) {
@@ -295,8 +312,8 @@ fn run_live(a: &Args) {
     let secs = start.elapsed().as_secs_f64();
     println!("--- {secs:.1} s total");
     for (name, s, windows) in &sensors {
-        let mut total = windows[1].lock().unwrap().clone();
-        total.merge_imu(&windows[3].lock().unwrap());
+        let mut total = lock(&windows[1]).clone();
+        total.merge_imu(&lock(&windows[3]));
         let get = |c: &std::sync::atomic::AtomicU64| c.load(std::sync::atomic::Ordering::Relaxed);
         println!("{}", total.line(name, secs, secs, true));
         println!(
