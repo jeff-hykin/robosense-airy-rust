@@ -281,13 +281,25 @@ impl Sensor {
         &self.frame_id
     }
 
-    /// Stops the threads. A thread parked in recv wakes on the socket shutdown (Linux) and is joined; where the OS
-    /// refuses to shut down a UDP socket it is left to exit on its next datagram.
+    /// A handle that stops the sensor from another thread (e.g. while a consumer is parked on `scans()`); the
+    /// queues then disconnect and the consumer's loop ends.
+    pub fn stop_handle(&self) -> io::Result<StopHandle> {
+        Ok(StopHandle {
+            stop: self.stop.clone(),
+            sockets: self.sockets.iter().map(|s| s.try_clone()).collect::<io::Result<_>>()?,
+        })
+    }
+
+    /// Stops the threads. On Linux, shutting a socket down wakes a thread parked in recv (even though shutdown on an
+    /// unconnected UDP socket reports ENOTCONN), so the threads are joined; elsewhere they are left to exit on their
+    /// next datagram.
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        let woke = self.sockets.iter().all(|s| s.shutdown(Shutdown::Read).is_ok());
+        for s in &self.sockets {
+            let _ = s.shutdown(Shutdown::Read);
+        }
         let threads = std::mem::take(&mut self.threads);
-        if woke {
+        if cfg!(target_os = "linux") {
             for t in threads {
                 let _ = t.join();
             }
@@ -300,3 +312,19 @@ impl Drop for Sensor {
         self.stop();
     }
 }
+
+pub struct StopHandle {
+    stop: Arc<AtomicBool>,
+    sockets: Vec<Socket>,
+}
+
+impl StopHandle {
+    /// Sets the stop flag and wakes the receive threads (see `Sensor::stop`); does not join them.
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for s in &self.sockets {
+            let _ = s.shutdown(Shutdown::Read);
+        }
+    }
+}
+

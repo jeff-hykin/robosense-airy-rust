@@ -28,4 +28,4 @@ mod trigon;
 pub use decoder::{Decoder, DecoderConfig, EchoMode, ImuSample, LidarModel, Point, Scan, SplitMode, Transform};
 pub use filter::FilterConfig;
 pub use packet::{classify, Difop, PacketKind};
-pub use sensor::{FramedScan, Sensor, SensorConfig, Stats};
+pub use sensor::{FramedScan, Sensor, SensorConfig, Stats, StopHandle};
