@@ -39,7 +39,8 @@ pub struct SensorConfig {
 }
 
 impl Default for SensorConfig {
-    /// rs_driver's input defaults (unicast, MSOP 6699, DIFOP 7788, no IMU) with one-deep queues.
+    /// rs_driver's input defaults (unicast, MSOP 6699, DIFOP 7788, no IMU); a one-scan queue and an eight-sample IMU
+    /// queue (200 Hz samples arrive in bursts; on the M20 a one-deep queue dropped ~1%, eight dropped none).
     fn default() -> Self {
         SensorConfig {
             group: None,
@@ -51,7 +52,7 @@ impl Default for SensorConfig {
             decoder: DecoderConfig::default(),
             filter: FilterConfig::default(),
             scan_queue: 1,
-            imu_queue: 1,
+            imu_queue: 8,
             imu_in_lidar_frame: false,
             recv_buffer_bytes: None,
         }

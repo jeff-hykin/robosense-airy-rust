@@ -29,6 +29,10 @@ and counted in `Sensor::stats()`, never queued up or throttled by a timer. The f
 mid-revolution) is skipped. `imu_in_lidar_frame` rotates IMU samples by the DIFOP's IMU extrinsic. `Decoder` can be
 used directly on packets from any source; `pcap::read_udp` reads tcpdump captures.
 
+On a Deep Robotics M20 (RK3588, `taskset -c 1-3 nice`, vendor driver running), both Airys for 30 s: 10.0 scans/s
+each, ~40k (front) / ~42k (rear) points per scan (dense, 0.2..60 m), scan span 100.0 ms, IMU 200 Hz, 0 scans or IMU
+samples dropped, ~31% of one core for both.
+
 `airy-stats` prints scan rate, points per scan, bounds and IMU rate:
 
 ```
@@ -56,8 +60,9 @@ fixtures every scan, point count, intensity, ring, per-point time, feature and I
 2 um (float rounding). Tests (`cargo test`) decode packets captured from the two Airys on a Deep Robotics M20
 (`tests/fixtures/`).
 
-`nix build` builds the library and `airy-stats` (crate2nix); `nix build .#aarch64-linux` cross-compiles it from
-x86_64 Linux.
+`nix build` builds the library and `airy-stats` (crate2nix; `nix build .#checks.<system>.tests` runs the tests);
+`nix build .#aarch64-linux` cross-compiles it from x86_64 Linux. Verified: `nix build` + tests on aarch64-darwin; the
+aarch64-linux binary built with `cargo zigbuild --target aarch64-unknown-linux-gnu.2.31` and run on the M20.
 
 ## License
 

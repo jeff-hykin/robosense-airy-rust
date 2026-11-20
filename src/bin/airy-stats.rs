@@ -133,7 +133,7 @@ fn parse() -> Args {
         lidars: vec![],
         interface: Ipv4Addr::UNSPECIFIED,
         seconds: None,
-        queues: (1, 1),
+        queues: (1, 8),
         ports: [6699, 7788, 6688],
         decoder: DecoderConfig { use_lidar_clock: true, dense_points: true, ts_first_point: true, ..Default::default() },
         filter: FilterConfig::default(),
