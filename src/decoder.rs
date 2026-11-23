@@ -98,8 +98,8 @@ pub struct DecoderConfig {
     pub end_angle: f32,
     pub split: SplitMode,
     pub transform: Option<Transform>,
-    /// true rounds x / y / z as rs_driver does built by GCC for aarch64 (its default -ffp-contract=fast fuses each
-    /// point's last multiply-add); false rounds every product and sum, as the C++ reads.
+    /// true rounds x / y / z as rs_driver built by GCC for aarch64 does (its default -ffp-contract=fast fuses a
+    /// multiply-add in each), bit for bit; false rounds every product and sum, as the C++ reads.
     pub fused_multiply_add: bool,
 }
 
@@ -625,9 +625,11 @@ impl Decoder {
                     let rxy = self.lens_center_rxy;
                     let (ch, sh) = (t.cos(angle_horiz_final), t.sin(angle_horiz_final));
                     let (ca, sa) = (t.cos(angle_horiz), t.sin(angle_horiz));
+                    // fused as GCC 9 -O2 builds rs_driver for aarch64 (checked to the bit on M20 captures): x adds
+                    // the distance term into the fused lens term, y and z fuse their first product
                     let (mut x, mut y, mut z) = if self.config.fused_multiply_add {
                         (
-                            dcv.mul_add(ch, rxy * ca),
+                            rxy.mul_add(ca, dcv * ch),
                             (-dcv).mul_add(sh, -(rxy * sa)),
                             distance.mul_add(t.sin(angle_vert), LENS_RZ),
                         )

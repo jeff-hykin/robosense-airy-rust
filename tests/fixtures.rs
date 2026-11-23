@@ -203,6 +203,45 @@ fn angle_window_and_range_filter() {
     assert!(half[0].points.len() < all[0].points.len());
 }
 
+/// rs_driver (897b14d, DecoderRSAIRY) built by GCC 9.4 -O2 for aarch64 (Ubuntu 20.04, as the M20's own driver) on
+/// these captures, per scan: point count and the FNV-1a hash of every point's x / y / z bits and intensity.
+const RS_DRIVER_GCC9_AARCH64: [(&str, &[(usize, u64)]); 2] = [
+    (
+        "front",
+        &[
+            (28115, 5385291707543146677),
+            (36773, 11883293108364393402),
+            (36821, 1854428452816083769),
+            (36836, 17119110914241845064),
+            (36731, 15053068177098199025),
+            (36650, 12205915547893981009),
+        ],
+    ),
+    ("rear", &[(26345, 4096010190069579174), (39498, 8197150073758073970), (39210, 16248941387799336527)]),
+];
+
+#[test]
+fn fused_multiply_adds_round_as_rs_driver_built_by_gcc_for_aarch64() {
+    for (lidar, (name, want)) in [FRONT, REAR].iter().zip(RS_DRIVER_GCC9_AARCH64) {
+        let mut decoder = decoder_with_difop(lidar, DecoderConfig { fused_multiply_add: true, ..vendor_config() });
+        let mut got = Vec::new();
+        for d in datagrams(lidar.msop_file).iter().filter(|d| d.dst_port == lidar.msop_port) {
+            if let Some(scan) = decoder.decode_msop(&d.payload).unwrap() {
+                let mut h: u64 = 0xcbf29ce484222325;
+                for p in &scan.points {
+                    for v in [p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), p.intensity as u32] {
+                        for b in v.to_le_bytes() {
+                            h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+                        }
+                    }
+                }
+                got.push((scan.points.len(), h));
+            }
+        }
+        assert_eq!(got, want, "{name}");
+    }
+}
+
 #[test]
 fn fused_multiply_adds_move_a_point_by_an_ulp_at_most() {
     let (_, plain) = complete_scans(&FRONT, vendor_config());
