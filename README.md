@@ -54,6 +54,9 @@ rs_driver [@ 897b14d](https://github.com/RoboSense-LiDAR/rs_driver/tree/897b14d3
 [basic_attr.hpp](https://github.com/RoboSense-LiDAR/rs_driver/blob/897b14d3bdb6186a75df27ba51b65b5bd5557723/src/rs_driver/driver/decoder/basic_attr.hpp).
 Not ported: the 192-beam model, pcap/raw/jumbo inputs, packet-level `isNewFrame` pre-splitting, CRC32 checks.
 
+`DecoderConfig::fused_multiply_add` rounds x / y / z as rs_driver built by GCC for aarch64 does (each point's last
+multiply-add fused, GCC's default -ffp-contract=fast), as on the M20's own driver; off by default.
+
 Checked against rs_driver itself: `tools/rs_driver_harness.cpp` builds rs_driver's `DecoderRSAIRY` on a capture
 (`examples/rs_driver_compare.rs` writes its input and this crate's output, `tools/compare.py` diffs them). On the
 fixtures every scan, point count, intensity, ring, per-point time, feature and IMU value is identical and x/y/z agree to

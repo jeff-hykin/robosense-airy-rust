@@ -202,3 +202,23 @@ fn angle_window_and_range_filter() {
     let (_, half) = complete_scans(&FRONT, DecoderConfig { start_angle: 0.0, end_angle: 180.0, ..vendor_config() });
     assert!(half[0].points.len() < all[0].points.len());
 }
+
+#[test]
+fn fused_multiply_adds_move_a_point_by_an_ulp_at_most() {
+    let (_, plain) = complete_scans(&FRONT, vendor_config());
+    let (_, fused) = complete_scans(&FRONT, DecoderConfig { fused_multiply_add: true, ..vendor_config() });
+    let (mut moved, mut total) = (0usize, 0usize);
+    for (a, b) in plain.iter().zip(&fused) {
+        assert_eq!(a.points.len(), b.points.len());
+        for (p, q) in a.points.iter().zip(&b.points) {
+            for (u, v) in [(p.x, q.x), (p.y, q.y), (p.z, q.z)] {
+                let ulps = (u.to_bits() as i64 - v.to_bits() as i64).abs();
+                // one ulp, or (where the two terms cancel) one rounding of a product: under 4 um at 60 m
+                assert!(ulps <= 1 || (u - v).abs() < 4e-6, "{u} vs {v}");
+                moved += (ulps != 0) as usize;
+                total += 1;
+            }
+        }
+    }
+    assert!(moved > 0 && moved < total, "{moved} of {total} coordinates moved");
+}

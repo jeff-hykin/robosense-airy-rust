@@ -98,6 +98,9 @@ pub struct DecoderConfig {
     pub end_angle: f32,
     pub split: SplitMode,
     pub transform: Option<Transform>,
+    /// true rounds x / y / z as rs_driver does built by GCC for aarch64 (its default -ffp-contract=fast fuses each
+    /// point's last multiply-add); false rounds every product and sum, as the C++ reads.
+    pub fused_multiply_add: bool,
 }
 
 impl Default for DecoderConfig {
@@ -113,6 +116,7 @@ impl Default for DecoderConfig {
             end_angle: 360.0,
             split: SplitMode::Angle(0.0),
             transform: None,
+            fused_multiply_add: false,
         }
     }
 }
@@ -617,11 +621,19 @@ impl Decoder {
                 {
                     let t = &self.trigon;
                     let cos_v = t.cos(angle_vert);
-                    let mut x =
-                        distance * cos_v * t.cos(angle_horiz_final) + self.lens_center_rxy * t.cos(angle_horiz);
-                    let mut y =
-                        -distance * cos_v * t.sin(angle_horiz_final) - self.lens_center_rxy * t.sin(angle_horiz);
-                    let mut z = distance * t.sin(angle_vert) + LENS_RZ;
+                    let dcv = distance * cos_v;
+                    let rxy = self.lens_center_rxy;
+                    let (ch, sh) = (t.cos(angle_horiz_final), t.sin(angle_horiz_final));
+                    let (ca, sa) = (t.cos(angle_horiz), t.sin(angle_horiz));
+                    let (mut x, mut y, mut z) = if self.config.fused_multiply_add {
+                        (
+                            dcv.mul_add(ch, rxy * ca),
+                            (-dcv).mul_add(sh, -(rxy * sa)),
+                            distance.mul_add(t.sin(angle_vert), LENS_RZ),
+                        )
+                    } else {
+                        (dcv * ch + rxy * ca, -dcv * sh - rxy * sa, distance * t.sin(angle_vert) + LENS_RZ)
+                    };
                     if let Some(m) = &self.transform {
                         let (px, py, pz) = (x, y, z);
                         x = m[0][0] * px + m[0][1] * py + m[0][2] * pz + m[0][3];
